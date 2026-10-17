@@ -1,3 +1,13 @@
+# Unreleased
+
+* Support for pyo3 0.30.
+* With the `kv` feature, keys colliding with `LogRecord` attributes (eg. `name`,
+  `msg`, `message`) are renamed by appending `_` instead of making Python's
+  `makeRecord` raise `KeyError` and dropping the message.
+* Use `Python::try_attach` when logging, so logging during interpreter shutdown
+  drops the message instead of panicking.
+* Fix the hello_world example not printing the Rust-side messages.
+
 # 0.13.4
 
 * Support for pyo3 0.29 (#77).

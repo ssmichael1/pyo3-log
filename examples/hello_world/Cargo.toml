@@ -12,5 +12,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 log = { version = "~0.4", features = ["kv"] }
-pyo3 = { version = "~0.26", features = ["extension-module"] }
+pyo3 = "0.30"
 pyo3-log = { path = "../..", features = ["kv"] }

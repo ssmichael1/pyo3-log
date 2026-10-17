@@ -15,11 +15,15 @@ class ExtraInfoFormatter(logging.Formatter):
         return f"{formatted_message}{extras_string}"
 
 
-logger = logging.getLogger('hello_world')
+# Configure the root logger, so both the Python side ('hello_world') and the
+# Rust side (prefixed with 'test_prefix', see src/lib.rs) get output.
+root = logging.getLogger()
 handler = logging.StreamHandler()
-handler.setFormatter(ExtraInfoFormatter("%(levelname)s:%(message)s"))
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+handler.setFormatter(ExtraInfoFormatter("%(name)s:%(levelname)s:%(message)s"))
+root.addHandler(handler)
+root.setLevel(logging.INFO)
+
+logger = logging.getLogger('hello_world')
 
 logger.info("Hello, world!", extra={"foo": 42, "bar": "baz"})
 

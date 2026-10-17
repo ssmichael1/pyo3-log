@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 #![doc(
-    html_root_url = "https://docs.rs/pyo3-log/0.2.1/pyo3-log/",
+    html_root_url = "https://docs.rs/pyo3-log/0.13.4/pyo3_log/",
     test(attr(deny(warnings))),
     test(attr(allow(unknown_lints, non_local_definitions)))
 )]
@@ -184,6 +184,8 @@
 
 use std::cmp;
 use std::collections::HashMap;
+#[cfg(feature = "kv")]
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -312,6 +314,10 @@ pub struct Logger {
     /// Caching configuration.
     caching: Caching,
 
+    /// Attribute names of Python `LogRecord` that can't be used as keys of `extra`.
+    #[cfg(feature = "kv")]
+    reserved_attrs: HashSet<String>,
+
     /// The cache with loggers and level filters.
     ///
     /// The nodes form a tree ‒ each one potentially holding a cache entry (or not) and might have
@@ -329,12 +335,27 @@ impl Logger {
     /// It defaults to having a filter for [`Debug`][LevelFilter::Debug].
     pub fn new(py: Python<'_>, caching: Caching) -> PyResult<Self> {
         let logging = py.import("logging")?;
+        #[cfg(feature = "kv")]
+        let reserved_attrs = {
+            let mut attrs: HashSet<String> = logging
+                .call_method1("makeLogRecord", (pyo3::types::PyDict::new(py),))?
+                .getattr("__dict__")?
+                .try_iter()?
+                .map(|key| key?.extract())
+                .collect::<PyResult<_>>()?;
+            // Set later by Formatter, but also refused by makeRecord.
+            attrs.insert("message".to_owned());
+            attrs.insert("asctime".to_owned());
+            attrs
+        };
         Ok(Self {
             top_filter: LevelFilter::Debug,
             filters: HashMap::new(),
             prefix: None,
             logging: logging.into(),
             caching,
+            #[cfg(feature = "kv")]
+            reserved_attrs,
             cache: Default::default(),
         })
     }
@@ -425,10 +446,7 @@ impl Logger {
         let root = self.cache.load();
         let mut node: &Arc<CacheNode> = &root;
         for segment in target.split("::") {
-            match node.children.get(segment) {
-                Some(sub) => node = sub,
-                None => return None,
-            }
+            node = node.children.get(segment)?;
         }
 
         Some(Arc::clone(node))
@@ -479,17 +497,25 @@ impl Logger {
                 use log::kv::{Key, Value, VisitSource};
                 use pyo3::types::{PyDict, PyString};
 
-                struct PyDictVisitor<'p> {
+                struct PyDictVisitor<'a, 'p> {
                     dict: Bound<'p, PyDict>,
+                    reserved: &'a HashSet<String>,
                 }
 
-                impl<'kvs, 'p> VisitSource<'kvs> for PyDictVisitor<'p> {
+                impl<'kvs, 'a, 'p> VisitSource<'kvs> for PyDictVisitor<'a, 'p> {
                     fn visit_pair(
                         &mut self,
                         key: Key<'kvs>,
                         value: Value<'kvs>,
                     ) -> Result<(), log::kv::Error> {
-                        let py_key = PyString::new(self.dict.py(), key.as_str());
+                        // Python's makeRecord raises KeyError if an `extra` key would overwrite
+                        // a LogRecord attribute, which would drop the whole message. Rename
+                        // such keys by appending underscores instead.
+                        let mut key = key.as_str().to_owned();
+                        while self.reserved.contains(&key) {
+                            key.push('_');
+                        }
+                        let py_key = PyString::new(self.dict.py(), &key);
                         let py_value = PyString::new(self.dict.py(), &value.to_string());
 
                         let _ = self.dict.set_item(py_key, py_value);
@@ -499,6 +525,7 @@ impl Logger {
 
                 let mut visitor = PyDictVisitor {
                     dict: PyDict::new(py),
+                    reserved: &self.reserved_attrs,
                 };
                 let _ = record.key_values().visit(&mut visitor);
 
@@ -592,7 +619,10 @@ impl Log for Logger {
         let cache = self.lookup(record.target());
 
         if self.enabled_inner(record.metadata(), &cache) {
-            Python::attach(|py| {
+            // Use try_attach so logging during interpreter shutdown (eg. from a background Rust
+            // thread or a Drop impl) or from within a GC traversal silently drops the message
+            // instead of panicking.
+            let _ = Python::try_attach(|py| {
                 // If an exception were triggered before this attempt to log,
                 // store it to the side for now and restore it afterwards.
                 let maybe_existing_exception = PyErr::take(py);
@@ -625,7 +655,7 @@ impl Log for Logger {
                 if let Some(e) = maybe_existing_exception {
                     e.restore(py);
                 }
-            })
+            });
         }
     }
 
